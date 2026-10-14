@@ -1,11 +1,14 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import type { Post } from './interfaces/post.interface.js';
+import type { CreatePostDto } from './dto/create-post.dto.js';
+import type { UpdatePostDto } from './dto/update-post.dto.js';
+import type { GetPostsQueryDto } from './dto/get-posts-query.dto.js';
 
 @Injectable()
 export class PostsService {
   private posts: Post[] = [
     {
-      id: '1',
+      id: 1,
       title: 'Getting Started with NestJS',
       content:
         'NestJS is a progressive Node.js framework for building efficient and scalable server-side applications.',
@@ -14,7 +17,7 @@ export class PostsService {
       updatedAt: new Date('2026-01-10T09:00:00.000Z'),
     },
     {
-      id: '2',
+      id: 2,
       title: 'Mastering TypeScript in 2026',
       content:
         'TypeScript provides static typing and modern JavaScript features to build robust applications.',
@@ -26,11 +29,11 @@ export class PostsService {
 
   private getNextId() {
     return this.posts.length > 0
-      ? (Math.max(...this.posts.map((p) => Number(p.id) || 0)) + 1).toString()
-      : '1';
+      ? Math.max(...this.posts.map((p) => Number(p.id) || 0)) + 1
+      : 1;
   }
 
-  getAll(query?: { limit?: number; page?: number; search?: string }): Post[] {
+  getAll(query?: GetPostsQueryDto): Post[] {
     let result = [...this.posts];
 
     if (query?.search) {
@@ -54,7 +57,7 @@ export class PostsService {
     return result;
   }
 
-  findOne(id: string): Post {
+  findOne(id: number): Post {
     const post = this.posts.find((item) => item.id === id);
     if (!post) {
       throw new NotFoundException(`Post with ID "${id}" not found`);
@@ -62,7 +65,7 @@ export class PostsService {
     return post;
   }
 
-  create(payload: Omit<Post, 'id' | 'createdAt' | 'updatedAt'>): Post {
+  create(payload: CreatePostDto): Post {
     const newPost: Post = {
       id: this.getNextId(),
       ...payload,
@@ -73,10 +76,7 @@ export class PostsService {
     return newPost;
   }
 
-  update(
-    id: string,
-    payload: Partial<Omit<Post, 'id' | 'createdAt' | 'updatedAt'>>,
-  ): Post {
+  update(id: number, payload: UpdatePostDto): Post {
     const index = this.posts.findIndex((item) => item.id === id);
     if (index === -1) {
       throw new NotFoundException(`Post with ID "${id}" not found`);
@@ -91,7 +91,7 @@ export class PostsService {
     return updatedPost;
   }
 
-  delete(id: string): { message: string; id: string } {
+  delete(id: number): { message: string; id: number } {
     const index = this.posts.findIndex((item) => item.id === id);
     if (index === -1) {
       throw new NotFoundException(`Post with ID "${id}" not found`);

@@ -6,13 +6,19 @@ import {
   HttpCode,
   HttpStatus,
   Param,
+  ParseIntPipe,
   Patch,
   Post,
   Put,
   Query,
+  UsePipes,
+  ValidationPipe,
 } from '@nestjs/common';
 import { PostsService } from './posts.service.js';
 import type { Post as PostEntity } from './interfaces/post.interface.js';
+import { CreatePostDto } from './dto/create-post.dto.js';
+import { UpdatePostDto } from './dto/update-post.dto.js';
+import { GetPostsQueryDto } from './dto/get-posts-query.dto.js';
 
 @Controller('posts')
 export class PostsController {
@@ -20,49 +26,46 @@ export class PostsController {
 
   @Get()
   @HttpCode(HttpStatus.OK)
-  getAll(
-    @Query('limit') limit?: number,
-    @Query('page') page?: number,
-    @Query('search') search?: string,
-  ): PostEntity[] {
-    return this.postsService.getAll({ limit, page, search });
+  getAll(@Query() query: GetPostsQueryDto): PostEntity[] {
+    return this.postsService.getAll(query);
   }
 
   @Get(':id')
   @HttpCode(HttpStatus.OK)
-  findOne(@Param('id') id: string): PostEntity {
+  findOne(@Param('id', ParseIntPipe) id: number): PostEntity {
     return this.postsService.findOne(id);
   }
 
   @Post()
   @HttpCode(HttpStatus.CREATED)
-  create(
-    @Body() payload: Omit<PostEntity, 'id' | 'createdAt' | 'updatedAt'>,
-  ): PostEntity {
-    return this.postsService.create(payload);
+  create(@Body() createPostDto: CreatePostDto): PostEntity {
+    return this.postsService.create(createPostDto);
   }
 
   @Patch(':id')
   @HttpCode(HttpStatus.OK)
   update(
-    @Param('id') id: string,
-    @Body() payload: Partial<Omit<PostEntity, 'id' | 'createdAt' | 'updatedAt'>>,
+    @Param('id', ParseIntPipe) id: number,
+    @Body() updatePostDto: UpdatePostDto,
   ): PostEntity {
-    return this.postsService.update(id, payload);
+    return this.postsService.update(id, updatePostDto);
   }
 
   @Put(':id')
   @HttpCode(HttpStatus.OK)
   replace(
-    @Param('id') id: string,
-    @Body() payload: Omit<PostEntity, 'id' | 'createdAt' | 'updatedAt'>,
+    @Param('id', ParseIntPipe) id: number,
+    @Body() createPostDto: CreatePostDto,
   ): PostEntity {
-    return this.postsService.update(id, payload);
+    return this.postsService.update(id, createPostDto);
   }
 
   @Delete(':id')
   @HttpCode(HttpStatus.OK)
-  delete(@Param('id') id: string): { message: string; id: string } {
+  delete(@Param('id', ParseIntPipe) id: number): {
+    message: string;
+    id: number;
+  } {
     return this.postsService.delete(id);
   }
 }
