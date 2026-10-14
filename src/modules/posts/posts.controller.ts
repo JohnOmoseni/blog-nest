@@ -16,9 +16,11 @@ import {
 } from '@nestjs/common';
 import { PostsService } from './posts.service.js';
 import type { Post as PostEntity } from './interfaces/post.interface.js';
-import { CreatePostDto } from './dto/create-post.dto.js';
-import { UpdatePostDto } from './dto/update-post.dto.js';
-import { GetPostsQueryDto } from './dto/get-posts-query.dto.js';
+import {
+  CreatePostDto,
+  GetPostsQueryDto,
+  UpdatePostDto,
+} from './dto/post.dto.js';
 
 @Controller('posts')
 export class PostsController {

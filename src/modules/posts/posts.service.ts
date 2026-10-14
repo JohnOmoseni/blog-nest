@@ -1,8 +1,10 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import type { Post } from './interfaces/post.interface.js';
-import type { CreatePostDto } from './dto/create-post.dto.js';
-import type { UpdatePostDto } from './dto/update-post.dto.js';
-import type { GetPostsQueryDto } from './dto/get-posts-query.dto.js';
+import type {
+  CreatePostDto,
+  UpdatePostDto,
+  GetPostsQueryDto,
+} from './dto/post.dto.js';
 
 @Injectable()
 export class PostsService {
