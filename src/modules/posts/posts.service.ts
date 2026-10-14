@@ -67,6 +67,10 @@ export class PostsService {
     return post;
   }
 
+  exists(id: number): boolean {
+    return this.posts.some((item) => item.id === id);
+  }
+
   create(payload: CreatePostDto): Post {
     const newPost: Post = {
       id: this.getNextId(),
