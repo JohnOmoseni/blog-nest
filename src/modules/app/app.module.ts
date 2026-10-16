@@ -1,12 +1,12 @@
 import { Module } from '@nestjs/common';
-import { ConfigModule } from '@nestjs/config';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { MongooseModule } from '@nestjs/mongoose';
 import { PostsModule } from '../posts/posts.module.js';
 import Joi from 'joi';
 import appConfig from '../../config/app.config.js';
 
 @Module({
   imports: [
-    PostsModule,
     ConfigModule.forRoot({
       isGlobal: true,
       load: [appConfig],
@@ -15,9 +15,17 @@ import appConfig from '../../config/app.config.js';
         NODE_ENV: Joi.string()
           .valid('development', 'production', 'test')
           .default('development'),
+        MONGODB_URI: Joi.string().required(),
       }),
       envFilePath: '.env',
     }),
+    MongooseModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => ({
+        uri: configService.get<string>('MONGODB_URI'),
+      }),
+    }),
+    PostsModule,
   ],
   providers: [],
 })

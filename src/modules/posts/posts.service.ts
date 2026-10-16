@@ -1,5 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import type { Post } from './interfaces/post.interface.js';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model, isValidObjectId } from 'mongoose';
+import { Post, PostDocument } from './schemas/post.schema.js';
 import type {
   CreatePostDto,
   UpdatePostDto,
@@ -8,105 +10,83 @@ import type {
 
 @Injectable()
 export class PostsService {
-  private posts: Post[] = [
-    {
-      id: 1,
-      title: 'Getting Started with NestJS',
-      content:
-        'NestJS is a progressive Node.js framework for building efficient and scalable server-side applications.',
-      authorName: 'John Doe',
-      createdAt: new Date('2026-01-10T09:00:00.000Z'),
-      updatedAt: new Date('2026-01-10T09:00:00.000Z'),
-    },
-    {
-      id: 2,
-      title: 'Mastering TypeScript in 2026',
-      content:
-        'TypeScript provides static typing and modern JavaScript features to build robust applications.',
-      authorName: 'Jane Smith',
-      createdAt: new Date('2026-01-15T14:30:00.000Z'),
-      updatedAt: new Date('2026-01-15T14:30:00.000Z'),
-    },
-  ];
+  constructor(
+    @InjectModel(Post.name)
+    private readonly postModel: Model<PostDocument>,
+  ) {}
 
-  private getNextId() {
-    return this.posts.length > 0
-      ? Math.max(...this.posts.map((p) => Number(p.id) || 0)) + 1
-      : 1;
-  }
-
-  getAll(query?: GetPostsQueryDto): Post[] {
-    let result = [...this.posts];
+  async getAll(query?: GetPostsQueryDto): Promise<PostDocument[]> {
+    const filter: Record<string, any> = {};
 
     if (query?.search) {
-      const term = query.search.toLowerCase();
-      result = result.filter(
-        (item) =>
-          item.title.toLowerCase().includes(term) ||
-          item.content.toLowerCase().includes(term),
-      );
+      filter.$or = [
+        { title: { $regex: query.search, $options: 'i' } },
+        { content: { $regex: query.search, $options: 'i' } },
+      ];
     }
 
-    if (query?.page && query?.limit) {
-      const page = Number(query.page);
-      const limit = Number(query.limit);
-      const start = (page - 1) * limit;
-      result = result.slice(start, start + limit);
-    } else if (query?.limit) {
-      result = result.slice(0, Number(query.limit));
-    }
+    const limit = query?.limit ? Number(query.limit) : 10;
+    const page = query?.page ? Number(query.page) : 1;
+    const skip = (page - 1) * limit;
 
-    return result;
+    return this.postModel.find(filter).skip(skip).limit(limit).exec();
   }
 
-  findOne(id: number): Post {
-    const post = this.posts.find((item) => item.id === id);
+  async findOne(id: string): Promise<PostDocument> {
+    if (!isValidObjectId(id)) {
+      throw new NotFoundException(`Post with ID "${id}" not found`);
+    }
+
+    const post = await this.postModel.findById(id).exec();
     if (!post) {
       throw new NotFoundException(`Post with ID "${id}" not found`);
     }
     return post;
   }
 
-  exists(id: number): boolean {
-    return this.posts.some((item) => item.id === id);
+  async exists(id: string): Promise<boolean> {
+    if (!isValidObjectId(id)) {
+      return false;
+    }
+    const count = await this.postModel.countDocuments({ _id: id }).exec();
+    return count > 0;
   }
 
-  create(payload: CreatePostDto): Post {
-    const newPost: Post = {
-      id: this.getNextId(),
-      ...payload,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-    };
-    this.posts.push(newPost);
-    return newPost;
+  async create(payload: CreatePostDto): Promise<PostDocument> {
+    const newPost = new this.postModel(payload);
+    return newPost.save();
   }
 
-  update(id: number, payload: UpdatePostDto): Post {
-    const index = this.posts.findIndex((item) => item.id === id);
-    if (index === -1) {
+  async update(id: string, payload: UpdatePostDto): Promise<PostDocument> {
+    if (!isValidObjectId(id)) {
       throw new NotFoundException(`Post with ID "${id}" not found`);
     }
 
-    const updatedPost: Post = {
-      ...this.posts[index],
-      ...payload,
-      updatedAt: new Date(),
-    };
-    this.posts[index] = updatedPost;
+    const updatedPost = await this.postModel
+      .findByIdAndUpdate(id, payload, { new: true })
+      .exec();
+
+    if (!updatedPost) {
+      throw new NotFoundException(`Post with ID "${id}" not found`);
+    }
+
     return updatedPost;
   }
 
-  delete(id: number): { message: string; id: number } {
-    const index = this.posts.findIndex((item) => item.id === id);
-    if (index === -1) {
+  async delete(id: string): Promise<{ message: string; id: string }> {
+    if (!isValidObjectId(id)) {
       throw new NotFoundException(`Post with ID "${id}" not found`);
     }
 
-    this.posts.splice(index, 1);
+    const deletedPost = await this.postModel.findByIdAndDelete(id).exec();
+    if (!deletedPost) {
+      throw new NotFoundException(`Post with ID "${id}" not found`);
+    }
+
     return {
       message: `Post with ID "${id}" deleted successfully`,
       id,
     };
   }
 }
+

@@ -6,14 +6,13 @@ import {
   HttpCode,
   HttpStatus,
   Param,
-  ParseIntPipe,
   Patch,
   Post,
   Put,
   Query,
 } from '@nestjs/common';
 import { PostsService } from './posts.service.js';
-import type { Post as PostEntity } from './interfaces/post.interface.js';
+import { PostDocument } from './schemas/post.schema.js';
 import {
   CreatePostDto,
   GetPostsQueryDto,
@@ -27,46 +26,47 @@ export class PostsController {
 
   @Get()
   @HttpCode(HttpStatus.OK)
-  getAll(@Query() query: GetPostsQueryDto): PostEntity[] {
+  async getAll(@Query() query: GetPostsQueryDto): Promise<PostDocument[]> {
     return this.postsService.getAll(query);
   }
 
   @Get(':id')
   @HttpCode(HttpStatus.OK)
-  findOne(@Param('id', ParseIntPipe, PostExistsPipe) id: number): PostEntity {
+  async findOne(@Param('id', PostExistsPipe) id: string): Promise<PostDocument> {
     return this.postsService.findOne(id);
   }
 
   @Post()
   @HttpCode(HttpStatus.CREATED)
-  create(@Body() createPostDto: CreatePostDto): PostEntity {
+  async create(@Body() createPostDto: CreatePostDto): Promise<PostDocument> {
     return this.postsService.create(createPostDto);
   }
 
   @Patch(':id')
   @HttpCode(HttpStatus.OK)
-  update(
-    @Param('id', ParseIntPipe, PostExistsPipe) id: number,
+  async update(
+    @Param('id', PostExistsPipe) id: string,
     @Body() updatePostDto: UpdatePostDto,
-  ): PostEntity {
+  ): Promise<PostDocument> {
     return this.postsService.update(id, updatePostDto);
   }
 
   @Put(':id')
   @HttpCode(HttpStatus.OK)
-  replace(
-    @Param('id', ParseIntPipe, PostExistsPipe) id: number,
+  async replace(
+    @Param('id', PostExistsPipe) id: string,
     @Body() createPostDto: CreatePostDto,
-  ): PostEntity {
+  ): Promise<PostDocument> {
     return this.postsService.update(id, createPostDto);
   }
 
   @Delete(':id')
   @HttpCode(HttpStatus.OK)
-  delete(@Param('id', ParseIntPipe, PostExistsPipe) id: number): {
+  async delete(@Param('id', PostExistsPipe) id: string): Promise<{
     message: string;
-    id: number;
-  } {
+    id: string;
+  }> {
     return this.postsService.delete(id);
   }
 }
+

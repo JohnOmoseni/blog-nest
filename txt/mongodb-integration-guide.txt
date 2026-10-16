@@ -1,0 +1,589 @@
+---
+name: nestjs-mongodb-mongoose-integration
+description: Comprehensive guide and workflow for integrating MongoDB with Mongoose in NestJS applications, covering MongoDB Atlas (cloud), local Docker setups, schema creation, asynchronous service integration, custom pipes, and testing.
+---
+
+# NestJS + MongoDB (Mongoose) Integration Guide
+
+This guide outlines the complete workflow for integrating MongoDB into a NestJS project using Mongoose (`@nestjs/mongoose`). It is structured as an operational reference and can easily be saved as a `SKILL.md` for reusable development workflows.
+
+---
+
+## Table of Contents
+1. Architecture & Data Flow
+2. Prerequisites & Package Installation
+3. MongoDB Connection Setup
+   - Option A: MongoDB Atlas (Cloud)
+   - Option B: Local MongoDB via Docker (Recommended)
+   - Option C: Local MongoDB via Native / Homebrew
+4. Environment Configuration & Fail-Safe Validation
+5. Root Module Configuration (`AppModule`)
+6. Schema Definition & Document Modeling
+7. Feature Module Registration (`MongooseModule.forFeature`)
+8. Service Layer Implementation (Real Database CRUD)
+9. Custom Validation Pipes (ObjectId & Existence Verification)
+10. Controller Layer Integration
+11. Unit Testing with Mongoose Mocks
+12. Production Best Practices & Common Gotchas
+
+---
+
+## 1. Architecture & Data Flow
+
+In a clean NestJS architecture, incoming HTTP requests flow through the following layers:
+
+[Client Request]
+       │
+       ▼
+[Global ValidationPipe]  <-- Validates body/query against DTOs (class-validator)
+       │
+       ▼
+[Controller Route Handler]
+       │
+       ▼
+[Custom Pipe (e.g. PostExistsPipe)]  <-- Verifies valid ObjectId & checks DB existence
+       │
+       ▼
+[Service Layer]  <-- Contains business logic, query construction, pagination
+       │
+       ▼
+[Mongoose Model (@InjectModel)]  <-- Strongly-typed Document interface
+       │
+       ▼
+[MongoDB Database]
+
+---
+
+## 2. Prerequisites & Package Installation
+
+Install the required NestJS and Mongoose libraries using your package manager (pnpm, npm, or yarn):
+
+```bash
+pnpm add @nestjs/mongoose mongoose
+```
+
+Supporting dependencies (already in place or standard for NestJS):
+```bash
+pnpm add @nestjs/config joi class-validator class-transformer @nestjs/mapped-types
+```
+
+---
+
+## 3. MongoDB Connection Setup
+
+You can connect to either a cloud cluster (MongoDB Atlas) or a local MongoDB database instance.
+
+### Option A: MongoDB Atlas (Cloud)
+1. **Create an Account & Cluster**:
+   - Go to [MongoDB Atlas](https://www.mongodb.com/cloud/atlas) and log in.
+   - Click **Create Database** -> Choose the free shared tier (M0).
+   - Select your preferred cloud provider and region closest to your users.
+2. **Configure Database Access (User Credentials)**:
+   - Navigate to **Security** -> **Database Access**.
+   - Click **Add New Database User**.
+   - Choose **Password** authentication.
+   - Enter a username (e.g. `blog_admin`) and a secure password.
+   - Grant role: **Read and write to any database** (or built-in `Atlas Admin` for development).
+   - Save the user credentials.
+3. **Configure Network Access (IP Whitelist)**:
+   - Navigate to **Security** -> **Network Access**.
+   - Click **Add IP Address**.
+   - For development: Click **Allow Access from Anywhere** (`0.0.0.0/0`) or add your current IP address.
+   - Click **Confirm**.
+4. **Obtain Connection String**:
+   - Navigate to **Deployment** -> **Database**.
+   - Click **Connect** on your cluster.
+   - Select **Drivers** -> Driver: **Node.js**.
+   - Copy the connection URI. It will look like:
+     ```
+     mongodb+srv://<username>:<password>@cluster0.abcde.mongodb.net/<database_name>?retryWrites=true&w=majority&appName=BlogNest
+     ```
+   - Replace `<username>`, `<password>`, and `<database_name>` with your actual values.
+
+---
+
+### Option B: Local MongoDB via Docker (Recommended for Local Dev)
+Docker provides an isolated, zero-install MongoDB environment that mirrors production without polluting your host machine.
+
+#### Method 1: Using `docker-compose.yml` (Recommended)
+Place a `docker-compose.yml` file in your project root:
+
+```yaml
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:7.0
+    container_name: blog-nest-mongo
+    restart: always
+    ports:
+      - '27017:27017'
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: mongoadmin
+      MONGO_INITDB_ROOT_PASSWORD: secretpassword
+      MONGO_INITDB_DATABASE: blog-nest
+    volumes:
+      - mongo_data:/data/db
+
+  mongo-express:
+    image: mongo-express:latest
+    container_name: blog-nest-mongo-express
+    restart: always
+    ports:
+      - '8081:8081'
+    environment:
+      ME_CONFIG_MONGODB_ADMINUSERNAME: mongoadmin
+      ME_CONFIG_MONGODB_ADMINPASSWORD: secretpassword
+      ME_CONFIG_MONGODB_URL: mongodb://mongoadmin:secretpassword@mongodb:27017/
+    depends_on:
+      - mongodb
+
+volumes:
+  mongo_data:
+```
+
+Commands:
+- Start containers: `docker compose up -d`
+- Stop containers: `docker compose down`
+- Access Web GUI: Open `http://localhost:8081` in your browser.
+- Connection URI for `.env`:
+  `mongodb://mongoadmin:secretpassword@localhost:27017/blog-nest?authSource=admin`
+
+#### Method 2: Single Docker Command
+If you do not want a compose file:
+```bash
+docker run -d \
+  --name blog-nest-mongo \
+  -p 27017:27017 \
+  -v mongo_blog_data:/data/db \
+  mongo:7.0
+```
+Connection URI for `.env`:
+`mongodb://localhost:27017/blog-nest`
+
+---
+
+### Option C: Local MongoDB via Homebrew (macOS)
+If you prefer running MongoDB natively as a system service:
+```bash
+brew tap mongodb/brew
+brew install mongodb-community@7.0
+brew services start mongodb/brew/mongodb-community
+```
+Connection URI for `.env`:
+`mongodb://localhost:27017/blog-nest`
+
+---
+
+## 4. Environment Configuration & Fail-Safe Validation
+
+Never hardcode database credentials. Use `.env` alongside Joi schema validation to guarantee the app refuses to boot if the connection string is absent or malformed.
+
+### `.env` File
+```env
+PORT=4000
+NODE_ENV=development
+# Cloud Atlas:
+# MONGODB_URI=mongodb+srv://username:password@cluster0.abcde.mongodb.net/blog-nest?retryWrites=true&w=majority
+# Local:
+MONGODB_URI=mongodb://localhost:27017/blog-nest
+```
+
+---
+
+## 5. Root Module Configuration (`AppModule`)
+
+Use `MongooseModule.forRootAsync` with `ConfigService` in `src/modules/app/app.module.ts`:
+
+```typescript
+import { Module } from '@nestjs/common';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { MongooseModule } from '@nestjs/mongoose';
+import { PostsModule } from '../posts/posts.module.js';
+import Joi from 'joi';
+import appConfig from '../../config/app.config.js';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      load: [appConfig],
+      validationSchema: Joi.object({
+        PORT: Joi.number().port().default(4000),
+        NODE_ENV: Joi.string()
+          .valid('development', 'production', 'test')
+          .default('development'),
+        MONGODB_URI: Joi.string().required(),
+      }),
+      envFilePath: '.env',
+    }),
+    MongooseModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => ({
+        uri: configService.get<string>('MONGODB_URI'),
+      }),
+    }),
+    PostsModule,
+  ],
+})
+export class AppModule {}
+```
+
+---
+
+## 6. Schema Definition & Document Modeling
+
+Create schemas using `@Schema()` and `@Prop()` decorators.
+
+File: `src/modules/posts/schemas/post.schema.ts`
+```typescript
+import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
+import { HydratedDocument } from 'mongoose';
+
+export type PostDocument = HydratedDocument<Post>;
+
+@Schema({
+  timestamps: true, // Automatically manages createdAt and updatedAt
+  toJSON: {
+    virtuals: true,
+    transform: (_, ret: Record<string, any>) => {
+      ret.id = ret._id.toString();
+      delete ret._id;
+      delete ret.__v;
+      return ret;
+    },
+  },
+})
+export class Post {
+  @Prop({ required: true, trim: true })
+  title: string;
+
+  @Prop({ required: true })
+  content: string;
+
+  @Prop({ required: true, trim: true })
+  authorName: string;
+
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export const PostSchema = SchemaFactory.createForClass(Post);
+
+// Helpful compound or text index for fast searching
+PostSchema.index({ title: 'text', content: 'text' });
+```
+
+---
+
+## 7. Feature Module Registration (`MongooseModule.forFeature`)
+
+Register the model so it can be injected into services in `src/modules/posts/posts.module.ts`:
+
+```typescript
+import { Module } from '@nestjs/common';
+import { MongooseModule } from '@nestjs/mongoose';
+import { PostsController } from './posts.controller.js';
+import { PostsService } from './posts.service.js';
+import { Post, PostSchema } from './schemas/post.schema.js';
+import { PostExistsPipe } from './pipes/post-exists.pipe.js';
+
+@Module({
+  imports: [
+    MongooseModule.forFeature([{ name: Post.name, schema: PostSchema }]),
+  ],
+  controllers: [PostsController],
+  providers: [PostsService, PostExistsPipe],
+  exports: [PostsService, PostExistsPipe],
+})
+export class PostsModule {}
+```
+
+---
+
+## 8. Service Layer Implementation (Real Database CRUD)
+
+File: `src/modules/posts/posts.service.ts`
+
+```typescript
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model, isValidObjectId } from 'mongoose';
+import { Post, PostDocument } from './schemas/post.schema.js';
+import type {
+  CreatePostDto,
+  UpdatePostDto,
+  GetPostsQueryDto,
+} from './dto/post.dto.js';
+
+@Injectable()
+export class PostsService {
+  constructor(
+    @InjectModel(Post.name)
+    private readonly postModel: Model<PostDocument>,
+  ) {}
+
+  async getAll(query?: GetPostsQueryDto): Promise<PostDocument[]> {
+    const filter: Record<string, any> = {};
+
+    if (query?.search) {
+      filter.$or = [
+        { title: { $regex: query.search, $options: 'i' } },
+        { content: { $regex: query.search, $options: 'i' } },
+      ];
+    }
+
+    const limit = query?.limit ? Number(query.limit) : 10;
+    const page = query?.page ? Number(query.page) : 1;
+    const skip = (page - 1) * limit;
+
+    return this.postModel.find(filter).skip(skip).limit(limit).exec();
+  }
+
+  async findOne(id: string): Promise<PostDocument> {
+    if (!isValidObjectId(id)) {
+      throw new NotFoundException(`Post with ID "${id}" not found`);
+    }
+
+    const post = await this.postModel.findById(id).exec();
+    if (!post) {
+      throw new NotFoundException(`Post with ID "${id}" not found`);
+    }
+    return post;
+  }
+
+  async exists(id: string): Promise<boolean> {
+    if (!isValidObjectId(id)) {
+      return false;
+    }
+    const count = await this.postModel.countDocuments({ _id: id }).exec();
+    return count > 0;
+  }
+
+  async create(payload: CreatePostDto): Promise<PostDocument> {
+    const newPost = new this.postModel(payload);
+    return newPost.save();
+  }
+
+  async update(id: string, payload: UpdatePostDto): Promise<PostDocument> {
+    if (!isValidObjectId(id)) {
+      throw new NotFoundException(`Post with ID "${id}" not found`);
+    }
+
+    const updatedPost = await this.postModel
+      .findByIdAndUpdate(id, payload, { new: true })
+      .exec();
+
+    if (!updatedPost) {
+      throw new NotFoundException(`Post with ID "${id}" not found`);
+    }
+
+    return updatedPost;
+  }
+
+  async delete(id: string): Promise<{ message: string; id: string }> {
+    if (!isValidObjectId(id)) {
+      throw new NotFoundException(`Post with ID "${id}" not found`);
+    }
+
+    const deletedPost = await this.postModel.findByIdAndDelete(id).exec();
+    if (!deletedPost) {
+      throw new NotFoundException(`Post with ID "${id}" not found`);
+    }
+
+    return {
+      message: `Post with ID "${id}" deleted successfully`,
+      id,
+    };
+  }
+}
+```
+
+---
+
+## 9. Custom Validation Pipes (ObjectId & Existence Verification)
+
+File: `src/modules/posts/pipes/post-exists.pipe.ts`
+
+```typescript
+import {
+  ArgumentMetadata,
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+  PipeTransform,
+} from '@nestjs/common';
+import { isValidObjectId } from 'mongoose';
+import { PostsService } from '../posts.service.js';
+
+@Injectable()
+export class PostExistsPipe implements PipeTransform<string, Promise<string>> {
+  constructor(private readonly postsService: PostsService) {}
+
+  async transform(value: string, _metadata?: ArgumentMetadata): Promise<string> {
+    // 1. Format check: Is this a valid 24-character hexadecimal MongoDB ObjectId?
+    if (!isValidObjectId(value)) {
+      throw new BadRequestException(
+        `Validation failed: "${value}" is not a valid MongoDB ObjectId`,
+      );
+    }
+
+    // 2. Existence check: Does this document exist in the database?
+    const exists = await this.postsService.exists(value);
+    if (!exists) {
+      throw new NotFoundException(`Post with ID "${value}" not found`);
+    }
+
+    return value;
+  }
+}
+```
+
+---
+
+## 10. Controller Layer Integration
+
+File: `src/modules/posts/posts.controller.ts`
+
+```typescript
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Patch,
+  Post,
+  Put,
+  Query,
+} from '@nestjs/common';
+import { PostsService } from './posts.service.js';
+import { PostDocument } from './schemas/post.schema.js';
+import {
+  CreatePostDto,
+  GetPostsQueryDto,
+  UpdatePostDto,
+} from './dto/post.dto.js';
+import { PostExistsPipe } from './pipes/post-exists.pipe.js';
+
+@Controller('posts')
+export class PostsController {
+  constructor(private readonly postsService: PostsService) {}
+
+  @Get()
+  @HttpCode(HttpStatus.OK)
+  async getAll(@Query() query: GetPostsQueryDto): Promise<PostDocument[]> {
+    return this.postsService.getAll(query);
+  }
+
+  @Get(':id')
+  @HttpCode(HttpStatus.OK)
+  async findOne(@Param('id', PostExistsPipe) id: string): Promise<PostDocument> {
+    return this.postsService.findOne(id);
+  }
+
+  @Post()
+  @HttpCode(HttpStatus.CREATED)
+  async create(@Body() createPostDto: CreatePostDto): Promise<PostDocument> {
+    return this.postsService.create(createPostDto);
+  }
+
+  @Patch(':id')
+  @HttpCode(HttpStatus.OK)
+  async update(
+    @Param('id', PostExistsPipe) id: string,
+    @Body() updatePostDto: UpdatePostDto,
+  ): Promise<PostDocument> {
+    return this.postsService.update(id, updatePostDto);
+  }
+
+  @Put(':id')
+  @HttpCode(HttpStatus.OK)
+  async replace(
+    @Param('id', PostExistsPipe) id: string,
+    @Body() createPostDto: CreatePostDto,
+  ): Promise<PostDocument> {
+    return this.postsService.update(id, createPostDto);
+  }
+
+  @Delete(':id')
+  @HttpCode(HttpStatus.OK)
+  async delete(@Param('id', PostExistsPipe) id: string): Promise<{
+    message: string;
+    id: string;
+  }> {
+    return this.postsService.delete(id);
+  }
+}
+```
+
+---
+
+## 11. Unit Testing with Mongoose Mocks
+
+When writing unit tests for services with injected models, use `getModelToken`:
+
+File: `src/modules/posts/posts.service.spec.ts`
+```typescript
+import { Test, TestingModule } from '@nestjs/testing';
+import { getModelToken } from '@nestjs/mongoose';
+import { PostsService } from './posts.service.js';
+import { Post } from './schemas/post.schema.js';
+
+describe('PostsService', () => {
+  let service: PostsService;
+
+  beforeEach(async () => {
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        PostsService,
+        {
+          provide: getModelToken(Post.name),
+          useValue: {
+            find: vi.fn(),
+            findById: vi.fn(),
+            countDocuments: vi.fn(),
+            create: vi.fn(),
+            findByIdAndUpdate: vi.fn(),
+            findByIdAndDelete: vi.fn(),
+          },
+        },
+      ],
+    }).compile();
+
+    service = module.get<PostsService>(PostsService);
+  });
+
+  it('should be defined', () => {
+    expect(service).toBeDefined();
+  });
+});
+```
+
+---
+
+## 12. Production Best Practices & Gotchas
+
+1. **Connection Pooling**:
+   For production workloads, tune connection pool size inside `useFactory`:
+   ```typescript
+   useFactory: (configService: ConfigService) => ({
+     uri: configService.get<string>('MONGODB_URI'),
+     maxPoolSize: 50,
+     minPoolSize: 10,
+     serverSelectionTimeoutMS: 5000,
+   })
+   ```
+2. **Lean Queries**:
+   When fetching documents for read-only purposes (e.g. `getAll`), add `.lean()` to bypass hydration overhead for 3-5x faster responses:
+   ```typescript
+   return this.postModel.find(filter).lean().exec();
+   ```
+3. **Database Indexes**:
+   Always index fields that are frequently queried (e.g. `@Prop({ index: true }) slug: string;`).
+4. **Avoid Sync `autoIndex` in Production**:
+   Building indexes on high-traffic databases can lock collections. In production, consider setting `autoIndex: false` in schema options and managing indexes through migration scripts.
+5. **ESM Extensions**:
+   In Node native ESM (`"type": "module"`), remember to include `.js` extensions for relative local imports (e.g. `from './schemas/post.schema.js'`).
