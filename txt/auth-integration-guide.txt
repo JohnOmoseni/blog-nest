@@ -1,0 +1,653 @@
+---
+name: nestjs-auth-passport-jwt-rbac
+description: Production-grade authentication and authorization guide for NestJS using Passport, JWT, Mongoose, and Role-Based Access Control (RBAC). Covers user registration, credential validation, JWT issuance, device session tracking, secure logout, password reset workflows, 6-digit OTP verification, and custom guards/decorators.
+---
+
+# NestJS Authentication & Authorization Guide (Passport, JWT, RBAC, Sessions & OTP)
+
+This operational guide provides the complete, production-ready implementation workflow for Authentication and Authorization in NestJS using Passport, JWT, and Mongoose. It is formatted for direct reference and can be converted into a `SKILL.md` for agentic pair-programming workflows.
+
+---
+
+## Table of Contents
+1. Architectural Separation of Concerns (Profile vs Auth)
+2. Prerequisites & Package Installation
+3. Environment Configuration & Validation
+4. Schema Modeling: Profile & Embedded Device Sessions
+5. Profile Module Implementation
+   - `ProfileService.findByEmailWithPassword`
+   - Session Tracking and Credential Mutation
+   - `ProfileController` with `@UseGuards(JwtAuthGuard, RoleGuard)`
+6. Role-Based Access Control (RBAC)
+   - Role Enum
+   - `@Roles()` Decorator & `RoleGuard`
+   - `@CurrentUser()` Parameter Decorator & `@Public()` Route Decorator
+7. Auth Module Implementation
+   - `AuthService.create` (User Registration with bcrypt)
+   - Login, JWT Generation, and Device Session Tracking
+   - Logout & Active Session Revocation
+   - Forgot Password, Verification, and Reset Logic
+   - 6-Digit Numeric OTP Generation and Verification
+8. Passport Strategies
+   - `LocalStrategy` (Passport Local)
+   - `JwtStrategy` (Bearer extraction with session revocation check)
+9. Guards Setup (`JwtAuthGuard` & `RoleGuard`)
+10. API Endpoints & Controller Mapping
+11. Unit Testing Workflows
+12. Security Best Practices & Production Hardening
+
+---
+
+## 1. Architectural Separation of Concerns (Profile vs Auth)
+
+In enterprise NestJS architectures, user data representation and authentication workflows should be decoupled:
+
+```
+[ Client Request ]
+       │
+       ▼
+[ Guards Layer: JwtAuthGuard -> RoleGuard ]
+       │
+       ├── Public Routes (Register, Login, Password Reset, OTP)
+       └── Protected Routes (Profile Me, Logout, Device Sessions, Admin Routes)
+       │
+       ▼
+┌───────────────────────────────┬────────────────────────────────┐
+│         AuthModule            │         ProfileModule          │
+├───────────────────────────────┼────────────────────────────────┤
+│ • AuthService.create()        │ • ProfileService               │
+│ • AuthService.login() [JWT]   │   - findByEmailWithPassword()  │
+│ • AuthService.logout()        │   - findById()                 │
+│ • Password Reset Workflows    │   - updatePassword()           │
+│ • Request & Verify OTP        │   - addOrUpdateDeviceSession() │
+│ • LocalStrategy & JwtStrategy │   - revokeDeviceSession()      │
+│ • Guards & Decorators         │ • ProfileController (@Guards)  │
+└───────────────────────────────┴────────────────────────────────┘
+                                │
+                                ▼
+                       [ MongoDB (Mongoose) ]
+```
+
+### Key Principles:
+1. **User Module named `ProfileModule`**: Encapsulates the user document, profile edits, lookups, and session storage.
+2. **`create` service defined in `AuthService`**: Registration encapsulates credential hashing, conflict verification, and user initialization.
+3. **`findByEmailWithPassword` defined in `ProfileService`**: Keeps raw credential queries isolated with explicit `.select('+password')` so that sensitive fields are never leaked by general profile lookups.
+4. **Device Sessions**: Each login generates or updates an embedded device session (`deviceId`, `ip`, `userAgent`, `lastActive`, `isRevoked`). When logging out, the session is marked `isRevoked: true`, invalidating the corresponding JWT immediately.
+
+---
+
+## 2. Prerequisites & Package Installation
+
+Install the required NestJS, Passport, JWT, and encryption libraries:
+
+### Using pnpm / npm / yarn:
+```bash
+# Core authentication and cryptography packages
+pnpm add @nestjs/passport passport passport-jwt passport-local @nestjs/jwt bcrypt
+
+# TypeScript definition packages
+pnpm add -D @types/passport-jwt @types/passport-local @types/bcrypt
+```
+
+> **Note for pnpm v12+**: When installing native binaries like `bcrypt`, pnpm may require build approval. Ensure `pnpm-workspace.yaml` contains:
+> ```yaml
+> allowBuilds:
+>   bcrypt: true
+> ```
+
+---
+
+## 3. Environment Configuration & Validation
+
+### 1. Define Environment Variables (`.env`):
+```env
+PORT=4000
+NODE_ENV=development
+MONGODB_URI=mongodb://localhost:27017/blog-nest
+JWT_SECRET=super-secret-jwt-key-change-in-production-2026
+JWT_EXPIRES_IN=1d
+```
+
+### 2. Create JWT Config Namespace (`src/config/jwt.config.ts`):
+```typescript
+import { registerAs } from '@nestjs/config';
+
+export default registerAs('jwt', () => ({
+  secret: process.env.JWT_SECRET || 'super-secret-jwt-key-change-in-production-2026',
+  expiresIn: process.env.JWT_EXPIRES_IN || '1d',
+}));
+```
+
+### 3. Fail-Safe Validation in `AppModule` (`src/modules/app/app.module.ts`):
+```typescript
+import Joi from 'joi';
+import jwtConfig from '../../config/jwt.config.js';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      load: [appConfig, jwtConfig],
+      validationSchema: Joi.object({
+        PORT: Joi.number().port().default(4000),
+        NODE_ENV: Joi.string().valid('development', 'production', 'test').default('development'),
+        MONGODB_URI: Joi.string().required(),
+        JWT_SECRET: Joi.string().required(),
+        JWT_EXPIRES_IN: Joi.string().default('1d'),
+      }),
+      envFilePath: '.env',
+    }),
+    // ...
+  ],
+})
+export class AppModule {}
+```
+
+---
+
+## 4. Schema Modeling: Profile & Embedded Device Sessions
+
+Sensitive fields (`password`, `resetPasswordToken`, `resetPasswordExpires`, `otpCode`, `otpExpires`) are marked with `select: false` to prevent accidental data leaks in standard queries.
+
+### File: `src/modules/profile/schemas/profile.schema.ts`
+```typescript
+import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
+import { HydratedDocument } from 'mongoose';
+import { Role } from '../enums/role.enum.js';
+
+export type ProfileDocument = HydratedDocument<Profile>;
+
+@Schema({ _id: false })
+export class DeviceSession {
+  @Prop({ required: true })
+  deviceId: string;
+
+  @Prop({ default: 'unknown' })
+  ip: string;
+
+  @Prop({ default: 'unknown' })
+  userAgent: string;
+
+  @Prop({ default: () => new Date() })
+  lastActive: Date;
+
+  @Prop({ default: false })
+  isRevoked: boolean;
+}
+
+export const DeviceSessionSchema = SchemaFactory.createForClass(DeviceSession);
+
+@Schema({ timestamps: true })
+export class Profile {
+  @Prop({ required: true, unique: true, lowercase: true, trim: true })
+  email: string;
+
+  @Prop({ required: true, select: false })
+  password: string;
+
+  @Prop({ required: true, trim: true })
+  name: string;
+
+  @Prop({ type: String, enum: Role, default: Role.USER })
+  role: Role;
+
+  @Prop({ default: true })
+  isActive: boolean;
+
+  @Prop({ required: false, select: false })
+  resetPasswordToken?: string;
+
+  @Prop({ required: false, select: false })
+  resetPasswordExpires?: Date;
+
+  @Prop({ required: false, select: false })
+  otpCode?: string;
+
+  @Prop({ required: false, select: false })
+  otpExpires?: Date;
+
+  @Prop({ type: [DeviceSessionSchema], default: [] })
+  deviceSessions: DeviceSession[];
+
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export const ProfileSchema = SchemaFactory.createForClass(Profile);
+```
+
+---
+
+## 5. Profile Module Implementation
+
+### 1. `ProfileService` (`src/modules/profile/profile.service.ts`):
+```typescript
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { Profile, ProfileDocument, DeviceSession } from './schemas/profile.schema.js';
+import { UpdateProfileDto } from './dto/update-profile.dto.js';
+
+@Injectable()
+export class ProfileService {
+  constructor(
+    @InjectModel(Profile.name)
+    private readonly profileModel: Model<ProfileDocument>,
+  ) {}
+
+  /**
+   * Explicitly retrieves profile with protected credential fields.
+   */
+  async findByEmailWithPassword(email: string): Promise<ProfileDocument | null> {
+    return this.profileModel
+      .findOne({ email: email.toLowerCase().trim() })
+      .select('+password +resetPasswordToken +resetPasswordExpires +otpCode +otpExpires')
+      .exec();
+  }
+
+  async findByEmail(email: string): Promise<ProfileDocument | null> {
+    return this.profileModel.findOne({ email: email.toLowerCase().trim() }).exec();
+  }
+
+  async findById(id: string): Promise<ProfileDocument | null> {
+    return this.profileModel.findById(id).exec();
+  }
+
+  async saveNewProfile(profileData: Partial<Profile>): Promise<ProfileDocument> {
+    const newProfile = new this.profileModel(profileData);
+    return newProfile.save();
+  }
+
+  async updatePassword(id: string, newHashedPassword: string): Promise<ProfileDocument | null> {
+    return this.profileModel
+      .findByIdAndUpdate(
+        id,
+        {
+          $set: { password: newHashedPassword },
+          $unset: { resetPasswordToken: 1, resetPasswordExpires: 1 },
+        },
+        { new: true },
+      )
+      .exec();
+  }
+
+  async setResetPasswordToken(id: string, token: string, expires: Date): Promise<void> {
+    await this.profileModel
+      .findByIdAndUpdate(id, {
+        $set: { resetPasswordToken: token, resetPasswordExpires: expires },
+      })
+      .exec();
+  }
+
+  async clearResetPasswordToken(id: string): Promise<void> {
+    await this.profileModel
+      .findByIdAndUpdate(id, {
+        $unset: { resetPasswordToken: 1, resetPasswordExpires: 1 },
+      })
+      .exec();
+  }
+
+  async setOtp(id: string, otpCode: string, expires: Date): Promise<void> {
+    await this.profileModel
+      .findByIdAndUpdate(id, {
+        $set: { otpCode, otpExpires: expires },
+      })
+      .exec();
+  }
+
+  async clearOtp(id: string): Promise<void> {
+    await this.profileModel
+      .findByIdAndUpdate(id, {
+        $unset: { otpCode: 1, otpExpires: 1 },
+      })
+      .exec();
+  }
+
+  async addOrUpdateDeviceSession(userId: string, session: DeviceSession): Promise<void> {
+    const profile = await this.profileModel.findById(userId).exec();
+    if (!profile) return;
+
+    const existingIndex = profile.deviceSessions.findIndex(
+      (s) => s.deviceId === session.deviceId,
+    );
+
+    if (existingIndex > -1) {
+      profile.deviceSessions[existingIndex].lastActive = new Date();
+      profile.deviceSessions[existingIndex].ip = session.ip;
+      profile.deviceSessions[existingIndex].userAgent = session.userAgent;
+      profile.deviceSessions[existingIndex].isRevoked = false;
+    } else {
+      profile.deviceSessions.push(session);
+      if (profile.deviceSessions.length > 15) {
+        profile.deviceSessions.shift();
+      }
+    }
+
+    await profile.save();
+  }
+
+  async revokeDeviceSession(userId: string, deviceId: string): Promise<boolean> {
+    const result = await this.profileModel.updateOne(
+      { _id: userId, 'deviceSessions.deviceId': deviceId },
+      { $set: { 'deviceSessions.$.isRevoked': true } },
+    );
+    return result.modifiedCount > 0;
+  }
+
+  async getDeviceSessions(userId: string): Promise<DeviceSession[]> {
+    const profile = await this.profileModel.findById(userId).exec();
+    if (!profile) throw new NotFoundException('Profile not found');
+    return profile.deviceSessions || [];
+  }
+
+  async update(id: string, updateProfileDto: UpdateProfileDto): Promise<ProfileDocument> {
+    const updated = await this.profileModel
+      .findByIdAndUpdate(id, { $set: updateProfileDto }, { new: true })
+      .exec();
+    if (!updated) throw new NotFoundException('Profile not found');
+    return updated;
+  }
+
+  async findAll(): Promise<ProfileDocument[]> {
+    return this.profileModel.find().exec();
+  }
+}
+```
+
+### 2. `ProfileController` (`src/modules/profile/profile.controller.ts`):
+```typescript
+import { Body, Controller, Get, HttpCode, HttpStatus, Param, Patch, UseGuards, NotFoundException } from '@nestjs/common';
+import { ProfileService } from './profile.service.js';
+import { UpdateProfileDto } from './dto/update-profile.dto.js';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
+import { RoleGuard } from '../auth/guards/role.guard.js';
+import { CurrentUser } from '../auth/decorators/current-user.decorator.js';
+import { Roles } from '../auth/decorators/roles.decorator.js';
+import { Role } from './enums/role.enum.js';
+
+@Controller('profile')
+@UseGuards(JwtAuthGuard, RoleGuard)
+export class ProfileController {
+  constructor(private readonly profileService: ProfileService) {}
+
+  @Get('me')
+  @HttpCode(HttpStatus.OK)
+  async getMyProfile(@CurrentUser() user: any) {
+    const profile = await this.profileService.findById(user.sub || user.id);
+    if (!profile) throw new NotFoundException('Profile not found');
+    return profile;
+  }
+
+  @Patch('me')
+  @HttpCode(HttpStatus.OK)
+  async updateMyProfile(@CurrentUser() user: any, @Body() updateProfileDto: UpdateProfileDto) {
+    return this.profileService.update(user.sub || user.id, updateProfileDto);
+  }
+
+  @Get('all')
+  @Roles(Role.ADMIN)
+  @HttpCode(HttpStatus.OK)
+  async getAllProfiles() {
+    return this.profileService.findAll();
+  }
+
+  @Get(':id')
+  @HttpCode(HttpStatus.OK)
+  async getProfileById(@Param('id') id: string) {
+    const profile = await this.profileService.findById(id);
+    if (!profile) throw new NotFoundException(`Profile with ID '${id}' not found`);
+    return profile;
+  }
+}
+```
+
+---
+
+## 6. Role-Based Access Control (RBAC)
+
+### 1. Role Enum (`src/modules/profile/enums/role.enum.ts`):
+```typescript
+export enum Role {
+  USER = 'user',
+  ADMIN = 'admin',
+  MODERATOR = 'moderator',
+}
+```
+
+### 2. `@Roles()` Decorator (`src/modules/auth/decorators/roles.decorator.ts`):
+```typescript
+import { SetMetadata } from '@nestjs/common';
+import { Role } from '../../profile/enums/role.enum.js';
+
+export const ROLES_KEY = 'roles';
+export const Roles = (...roles: Role[]) => SetMetadata(ROLES_KEY, roles);
+```
+
+### 3. `RoleGuard` (`src/modules/auth/guards/role.guard.ts`):
+```typescript
+import { CanActivate, ExecutionContext, ForbiddenException, Injectable } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
+import { ROLES_KEY } from '../decorators/roles.decorator.js';
+import { Role } from '../../profile/enums/role.enum.js';
+
+@Injectable()
+export class RoleGuard implements CanActivate {
+  constructor(private readonly reflector: Reflector) {}
+
+  canActivate(context: ExecutionContext): boolean {
+    const requiredRoles = this.reflector.getAllAndOverride<Role[]>(ROLES_KEY, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
+
+    if (!requiredRoles || requiredRoles.length === 0) {
+      return true;
+    }
+
+    const { user } = context.switchToHttp().getRequest();
+    if (!user || !user.role) {
+      throw new ForbiddenException('Access denied: You do not possess the required permissions');
+    }
+
+    const hasRole = requiredRoles.includes(user.role);
+    if (!hasRole) {
+      throw new ForbiddenException(
+        `Forbidden resource: Role '${user.role}' is not authorized to access this resource`,
+      );
+    }
+
+    return true;
+  }
+}
+
+export const RolesGuard = RoleGuard;
+```
+
+### 4. `@CurrentUser()` Parameter Decorator (`src/modules/auth/decorators/current-user.decorator.ts`):
+```typescript
+import { createParamDecorator, ExecutionContext } from '@nestjs/common';
+
+export const CurrentUser = createParamDecorator(
+  (data: string | undefined, ctx: ExecutionContext) => {
+    const request = ctx.switchToHttp().getRequest();
+    const user = request.user;
+    return data ? user?.[data] : user;
+  },
+);
+```
+
+---
+
+## 7. Auth Module Implementation
+
+### `AuthService` (`src/modules/auth/auth.service.ts`):
+- `create(registerDto)`: Hashes password with bcrypt (salt = 10), saves via ProfileService.
+- `validateUser(email, pass)`: Compares candidate password against hashed password.
+- `login(loginDto, ip, userAgent)`: Verifies credentials, records active device session, signs JWT payload `{ sub, email, role, deviceId }`.
+- `logout(userId, deviceId)`: Marks the target device session as `isRevoked: true`.
+- `forgotPassword(dto)`: Issues 32-byte hex crypto token valid for 1 hour.
+- `verifyResetPassword(dto)`: Validates token matching and unexpired timestamp.
+- `resetPassword(dto)`: Verifies token, hashes new password, updates profile, clears token.
+- `requestOtp(dto)`: Generates cryptographically secure 6-digit numeric code with 10-minute expiry.
+- `verifyOtp(dto)`: Verifies 6-digit OTP and invalidates on success.
+
+### `AuthController` (`src/modules/auth/auth.controller.ts`):
+```typescript
+@Controller('auth')
+export class AuthController {
+  constructor(private readonly authService: AuthService) {}
+
+  @Post('register')
+  @HttpCode(HttpStatus.CREATED)
+  async register(@Body() registerDto: RegisterDto) {
+    return this.authService.create(registerDto);
+  }
+
+  @Post('login')
+  @HttpCode(HttpStatus.OK)
+  async login(@Body() loginDto: LoginDto, @Req() req: Request) {
+    const ip = (req.headers['x-forwarded-for'] as string) || req.socket.remoteAddress || '127.0.0.1';
+    const userAgent = req.headers['user-agent'] || 'unknown';
+    if (!loginDto.deviceId && req.headers['x-device-id']) {
+      loginDto.deviceId = req.headers['x-device-id'] as string;
+    }
+    return this.authService.login(loginDto, ip, userAgent);
+  }
+
+  @Post('logout')
+  @UseGuards(JwtAuthGuard, RoleGuard)
+  @HttpCode(HttpStatus.OK)
+  async logout(@CurrentUser() user: any, @Req() req: Request) {
+    const deviceId = user.deviceId || (req.headers['x-device-id'] as string) || req.body?.deviceId;
+    return this.authService.logout(user.sub || user.id, deviceId);
+  }
+
+  @Get('device-sessions')
+  @UseGuards(JwtAuthGuard, RoleGuard)
+  @HttpCode(HttpStatus.OK)
+  async getDeviceSessions(@CurrentUser() user: any) {
+    return this.authService.getDeviceSessions(user.sub || user.id);
+  }
+
+  @Delete('device-sessions/:deviceId')
+  @UseGuards(JwtAuthGuard, RoleGuard)
+  @HttpCode(HttpStatus.OK)
+  async revokeDeviceSession(@CurrentUser() user: any, @Param('deviceId') deviceId: string) {
+    return this.authService.revokeDeviceSession(user.sub || user.id, deviceId);
+  }
+
+  @Post('forgot-password')
+  @HttpCode(HttpStatus.OK)
+  async forgotPassword(@Body() dto: ForgotPasswordDto) {
+    return this.authService.forgotPassword(dto);
+  }
+
+  @Post('verify-reset-password')
+  @HttpCode(HttpStatus.OK)
+  async verifyResetPassword(@Body() dto: VerifyResetPasswordDto) {
+    return this.authService.verifyResetPassword(dto);
+  }
+
+  @Post('reset-password')
+  @HttpCode(HttpStatus.OK)
+  async resetPassword(@Body() dto: ResetPasswordDto) {
+    return this.authService.resetPassword(dto);
+  }
+
+  @Post('request-otp')
+  @HttpCode(HttpStatus.OK)
+  async requestOtp(@Body() dto: RequestOtpDto) {
+    return this.authService.requestOtp(dto);
+  }
+
+  @Post('verify-otp')
+  @HttpCode(HttpStatus.OK)
+  async verifyOtp(@Body() dto: VerifyOtpDto) {
+    return this.authService.verifyOtp(dto);
+  }
+}
+```
+
+---
+
+## 8. Passport Strategies
+
+### 1. `JwtStrategy` with Session Revocation Verification (`src/modules/auth/strategies/jwt.strategy.ts`):
+```typescript
+import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { PassportStrategy } from '@nestjs/passport';
+import { ExtractJwt, Strategy } from 'passport-jwt';
+import { ProfileService } from '../../profile/profile.service.js';
+import { JwtPayload } from '../auth.service.js';
+
+@Injectable()
+export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
+  constructor(
+    configService: ConfigService,
+    private readonly profileService: ProfileService,
+  ) {
+    super({
+      jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
+      ignoreExpiration: false,
+      secretOrKey: configService.get<string>('JWT_SECRET')!,
+    });
+  }
+
+  async validate(payload: JwtPayload) {
+    const profile = await this.profileService.findById(payload.sub);
+
+    if (!profile || !profile.isActive) {
+      throw new UnauthorizedException('User account no longer exists or is inactive');
+    }
+
+    // Verify if device session was explicitly revoked upon logout
+    if (payload.deviceId && profile.deviceSessions) {
+      const session = profile.deviceSessions.find((s) => s.deviceId === payload.deviceId);
+      if (session && session.isRevoked) {
+        throw new UnauthorizedException('Your session has been revoked. Please sign in again.');
+      }
+    }
+
+    return {
+      sub: profile._id.toString(),
+      id: profile._id.toString(),
+      email: profile.email,
+      name: profile.name,
+      role: profile.role,
+      deviceId: payload.deviceId,
+    };
+  }
+}
+```
+
+---
+
+## 9. API Workflow Summary Table
+
+| Method | Endpoint | Protection | Description |
+|---|---|---|---|
+| `POST` | `/auth/register` | Public | Create new account (AuthService.create) |
+| `POST` | `/auth/login` | Public | Authenticate, issue JWT, record session |
+| `POST` | `/auth/logout` | `JwtAuthGuard, RoleGuard` | Revoke active device session |
+| `GET` | `/auth/device-sessions` | `JwtAuthGuard, RoleGuard` | List all tracked device sessions |
+| `DELETE`| `/auth/device-sessions/:deviceId` | `JwtAuthGuard, RoleGuard` | Revoke specific device session |
+| `POST` | `/auth/forgot-password` | Public | Generate 32-byte secure reset token |
+| `POST` | `/auth/verify-reset-password` | Public | Verify reset token validity & expiry |
+| `POST` | `/auth/reset-password` | Public | Update password with verified token |
+| `POST` | `/auth/request-otp` | Public | Generate 6-digit numeric OTP code |
+| `POST` | `/auth/verify-otp` | Public | Verify numeric OTP code |
+| `GET` | `/profile/me` | `JwtAuthGuard, RoleGuard` | Retrieve authenticated profile |
+| `PATCH`| `/profile/me` | `JwtAuthGuard, RoleGuard` | Update authenticated profile |
+| `GET` | `/profile/all` | `JwtAuthGuard, RoleGuard + @Roles(ADMIN)` | List all profiles (Admin only) |
+| `GET` | `/profile/:id` | `JwtAuthGuard, RoleGuard` | Retrieve profile by MongoDB ObjectId |
+
+---
+
+## 10. Security Best Practices & Production Hardening
+
+1. **Avoid Password Leakage**: Always define password with `select: false` in Mongoose. Only retrieve it in `findByEmailWithPassword` when doing hash verification.
+2. **Prevent Email Enumeration**: In production, `forgot-password` and `request-otp` should return identical generic success messages regardless of whether the email exists in the database.
+3. **Session Revocation via JWT**: Standard JWTs are stateless and cannot be revoked prior to expiration without a blacklist or session identifier. By embedding `deviceId` into the JWT payload and checking `isRevoked` in `JwtStrategy.validate()`, logouts and compromised devices are revoked instantly.
+4. **Use Cryptographically Secure Randomness**: Never use `Math.random()` for password tokens or OTPs. Use Node.js built-in `crypto.randomBytes(32)` and `crypto.randomInt(100000, 999999)`.
+5. **Rate Limiting**: Protect authentication endpoints with `@nestjs/throttler` to mitigate brute-force attempts on `/auth/login`, `/auth/verify-otp`, and `/auth/reset-password`.
