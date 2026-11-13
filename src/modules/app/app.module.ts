@@ -4,6 +4,8 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { PostsModule } from '../posts/posts.module.js';
 import { ProfileModule } from '../profile/profile.module.js';
 import { AuthModule } from '../auth/auth.module.js';
+import { AppController } from './app.controller.js';
+import { AppService } from './app.service.js';
 import Joi from 'joi';
 import appConfig from '../../config/app.config.js';
 import jwtConfig from '../../config/jwt.config.js';
@@ -28,10 +30,12 @@ import jwtConfig from '../../config/jwt.config.js';
         uri: configService.get<string>('MONGODB_URI'),
       }),
     }),
-    PostsModule,
-    ProfileModule,
+
     AuthModule,
+    ProfileModule,
+    PostsModule,
   ],
-  providers: [],
+  controllers: [AppController],
+  providers: [AppService],
 })
 export class AppModule {}
